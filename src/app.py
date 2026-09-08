@@ -403,6 +403,17 @@ def airway_to_direct_laryngoscope(x):
     )
 
 
+def airway_to_flexible_bronchoscopic(x):
+
+    s = str(x)
+
+    return (
+        "ファイバー" in s
+        or "fiberoptic" in s.lower()
+        or "bronchoscop" in s.lower()
+    )
+
+
 def airway_to_dlt(x):
 
     s = str(x)
@@ -542,6 +553,26 @@ def surgery_to_nonvascular_open(x):
         or "craniotomy" in s.lower()
         or "cranioplasty" in s.lower()
     )
+
+
+def surgery_to_major_vessels_open(x):
+    """人工血管置換術(腹部) (abdominal vascular graft replacement) is an
+    open major-vessel procedure. Scoped to the (腹部) abdominal variant
+    only - the (弓部) aortic arch variant is a cardiac CPB case, already
+    handled by required_case_to_cardiac_with_cpb via 経験必要症例分類."""
+
+    s = str(x)
+
+    return "人工血管置換術(腹部)" in s
+
+
+def surgery_to_major_vessels_endo(x):
+    """TAVI (transcatheter aortic valve implantation) is done entirely via
+    catheter regardless of vascular approach (femoral/subclavian/carotid)."""
+
+    s = str(x)
+
+    return "tavi" in s.lower()
 
 
 def surgery_to_cesarean_delivery(x):
@@ -867,6 +898,10 @@ def row_to_case(row, career_start=None):
             airway_text
         ),
 
+        "flexible_bronchoscopic": airway_to_flexible_bronchoscopic(
+            device_text
+        ),
+
         "dlt": airway_to_dlt(
             airway_type_text
         ),
@@ -885,6 +920,14 @@ def row_to_case(row, career_start=None):
 
         "cardiac_without_cpb": required_case_to_cardiac_without_cpb(
             required_case_text, procedure_text
+        ),
+
+        "major_vessels_open": surgery_to_major_vessels_open(
+            procedure_text
+        ),
+
+        "major_vessels_endo": surgery_to_major_vessels_endo(
+            procedure_text
         ),
 
         "nonvascular_open": surgery_to_nonvascular_open(procedure_text) or required_case_to_nonvascular_open(

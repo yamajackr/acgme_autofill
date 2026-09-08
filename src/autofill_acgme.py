@@ -426,10 +426,20 @@ def main():
 
         for i, case in enumerate(cases, start=1):
             print(f"\n--- Case {i}/{n}: ID={case.get('case_id')} Date={case.get('case_date')} ---")
-            page.goto(ACGME_URL)
-            page.wait_for_load_state("networkidle")
-            fill_case(page, case)
-            submit_or_pause(page, i, n)
+            try:
+                page.goto(ACGME_URL)
+                page.wait_for_load_state("networkidle")
+                fill_case(page, case)
+                submit_or_pause(page, i, n)
+            except Exception as e:
+                if "closed" not in str(e).lower():
+                    raise
+                remaining = [c.get("case_id") for c in cases[i - 1:]]
+                print(f"\nBrowser window was closed - stopped after {i - 1}/{n} case(s).")
+                print(f"Not yet filled: {remaining}")
+                print("Rerun the script to continue (cases_to_fill.json still has all cases - "
+                      "trim the already-submitted ones first if you don't want to redo them).")
+                return
 
         print("\nAll cases completed.")
         input("Press Enter to close browser...")
