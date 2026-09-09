@@ -249,6 +249,51 @@ def get_career_start(roster, resident_name):
     return parse_excel_datetime(match.iloc[0].get("Career starting date"))
 
 
+EMAIL_COLUMN_CANDIDATES = ("Email", "email", "E-mail", "e-mail", "メールアドレス")
+PASSWORD_COLUMN_CANDIDATES = ("Password", "password", "PW", "パスワード")
+
+
+def lookup_resident_field(roster, resident_name, column_candidates):
+    """Look up one resident's value from the roster, by their exact name,
+    trying each of column_candidates in turn. Returns '' if there's no
+    such column, no matching row, or the cell is blank for that resident -
+    callers should treat that as "nothing to show/fill", not fall back to
+    someone else's value.
+
+    Column names are matched case/whitespace-insensitively - a hand-typed
+    header ("Email " with a trailing space, "EMAIL", etc.) would otherwise
+    silently fail an exact-match lookup even though the data is right
+    there, which is exactly what happened before this fix.
+    """
+
+    if roster is None or not resident_name:
+        return ""
+
+    match = roster[roster["Anesthesiologist"] == resident_name]
+
+    if match.empty:
+        return ""
+
+    normalized_candidates = {c.strip().casefold() for c in column_candidates}
+
+    for col in roster.columns:
+        if str(col).strip().casefold() in normalized_candidates:
+            value = match.iloc[0].get(col)
+
+            if pd.notna(value) and str(value).strip():
+                return str(value).strip()
+
+    return ""
+
+
+def get_resident_email(roster, resident_name):
+    return lookup_resident_field(roster, resident_name, EMAIL_COLUMN_CANDIDATES)
+
+
+def get_resident_password(roster, resident_name):
+    return lookup_resident_field(roster, resident_name, PASSWORD_COLUMN_CANDIDATES)
+
+
 # ---------------------------------------------------
 # Helper functions
 # ---------------------------------------------------
@@ -1181,6 +1226,24 @@ if resident_roster is not None:
         st.sidebar.caption(f"Career start: {career_start.date()}")
     else:
         st.sidebar.caption("No career start date on file for this resident.")
+
+    selected_login_email = get_resident_email(resident_roster, selected_resident)
+
+    if selected_login_email:
+        st.sidebar.caption("Login email:")
+        st.sidebar.code(selected_login_email, language=None)
+    # else: no email on file - say nothing, per "if it's blank, not show".
+
+    selected_login_password = get_resident_password(resident_roster, selected_resident)
+
+    if selected_login_password:
+        # Shown in plaintext (with st.code's built-in copy button) rather
+        # than masked - this is a local, single-user app, and the password
+        # is already stored in plaintext in the roster spreadsheet, so
+        # this isn't an additional exposure beyond that existing tradeoff.
+        st.sidebar.caption("Login password:")
+        st.sidebar.code(selected_login_password, language=None)
+    # else: no password on file - say nothing, same as email.
 else:
     st.sidebar.warning(
         "No resident roster found or couldn't be read - use the "
@@ -1188,6 +1251,8 @@ else:
         "Case Year will be left blank until then."
     )
     career_start = None
+    selected_login_email = ""
+    selected_login_password = ""
 
 uploaded = st.file_uploader(
     "Upload Excel",
@@ -1274,7 +1339,7 @@ if uploaded:
         )
 
         subprocess.Popen(
-            [sys.executable, str(AUTOFILL_SCRIPT)],
+            [sys.executable, str(AUTOFILL_SCRIPT), str(CASES_JSON), selected_login_email, selected_login_password],
             cwd=str(WORKING_DIR),
         )
 

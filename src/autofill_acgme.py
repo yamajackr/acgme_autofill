@@ -8,8 +8,15 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ACGME_URL = "https://apps.acgme.org/ads/CaseLogs/CaseEntry/Insert"
-ACGME_LOGIN_EMAIL = "yamamoto.ryosuke@kameda.jp"
 JSON_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("cases_to_fill.json")
+
+# The Streamlit app passes the selected resident's login email/password as
+# the 2nd/3rd CLI args (per the roster's Email/Password columns; '' if
+# that resident has none on file). Email falls back to this default only
+# when run standalone by hand; password has no such fallback - never
+# hardcode a real password here.
+LOGIN_EMAIL = sys.argv[2] if len(sys.argv) > 2 else "yamamoto.ryosuke@kameda.jp"
+LOGIN_PASSWORD = sys.argv[3] if len(sys.argv) > 3 else ""
 
 # "Select all" is Cmd+A on macOS, Ctrl+A everywhere else (Windows/Linux).
 SELECT_ALL_KEY = "Meta+A" if platform.system() == "Darwin" else "Control+A"
@@ -48,8 +55,7 @@ def click_sign_in(page):
 
 
 def fill_login_email(page, email):
-    """Fill the ACGME Cloud email field. Stops here on purpose - finish
-    logging in (password / 2FA) by hand.
+    """Fill the ACGME Cloud email field.
 
     The login page (Sign In redirects to an Auth0-hosted page) can still be
     rendering its form client-side after networkidle fires, so a plain
@@ -57,6 +63,10 @@ def fill_login_email(page, email):
     and give up before the field ever appears. wait_for() actively waits
     for each candidate instead.
     """
+    if not email:
+        print("  No login email on file for this resident - leaving it blank to fill in by hand.")
+        return False
+
     for selector in ('input[type="email"]', 'input[name="username"]', "#username"):
         locator = page.locator(selector).first
 
@@ -72,6 +82,45 @@ def fill_login_email(page, email):
 
     print("  NOT FOUND: login email field")
     return False
+
+
+def fill_login_password(page, password):
+    """Advance past the email screen (if needed) and fill the ACGME Cloud
+    password field. Still stops here on purpose - the final Sign In click
+    and any 2FA are left for you to do by hand.
+
+    Auth0's default hosted login often splits email and password across
+    two screens (email -> Continue -> password); some configurations show
+    both on one form instead. Only click Continue if the password field
+    isn't already visible.
+    """
+    if not password:
+        print("  No login password on file for this resident - leaving it blank to fill in by hand.")
+        return False
+
+    password_field = page.locator('input[type="password"]').first
+
+    if not password_field.is_visible():
+        continue_button = page.get_by_role("button", name="Continue")
+
+        if continue_button.count() == 0:
+            continue_button = page.locator('button[type="submit"]')
+
+        if continue_button.count() > 0:
+            continue_button.first.click()
+        else:
+            print("  NOT FOUND: 'Continue' button to reach the password screen")
+
+    try:
+        password_field.wait_for(state="visible", timeout=8000)
+    except Exception:
+        print("  NOT FOUND: login password field")
+        return False
+
+    password_field.click()
+    password_field.fill(password)
+    print("  filled login password")
+    return True
 
 
 def fill_case_id(page, case_id):
@@ -426,9 +475,10 @@ def main():
         page.goto(ACGME_URL, wait_until="domcontentloaded")
 
         if click_sign_in(page):
-            fill_login_email(page, ACGME_LOGIN_EMAIL)
+            fill_login_email(page, LOGIN_EMAIL)
+            fill_login_password(page, LOGIN_PASSWORD)
 
-        input("\nFinish logging in (password/2FA), navigate to Add Cases, then press Enter...")
+        input("\nFinish logging in (submit / 2FA), navigate to Add Cases, then press Enter...")
 
         for i, case in enumerate(cases, start=1):
             print(f"\n--- Case {i}/{n}: ID={case.get('case_id')} Date={case.get('case_date')} ---")
