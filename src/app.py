@@ -25,44 +25,69 @@ st.title("ACGME Case Log Helper")
 # Working folder (data/ and cases_to_fill.json live here)
 # ---------------------------------------------------
 
+def load_config():
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config_value(key, value):
+    """Merge one key into the config file, leaving the rest untouched."""
+
+    config = load_config()
+    config[key] = str(value)
+
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
 def load_working_dir():
     """Return the previously-chosen working folder, or None if there isn't
     one yet (or it no longer exists on disk)."""
 
-    try:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        saved = config.get("working_dir")
+    saved = load_config().get("working_dir")
 
-        if saved and Path(saved).is_dir():
-            return Path(saved)
-
-    except Exception:
-        pass
+    if saved and Path(saved).is_dir():
+        return Path(saved)
 
     return None
 
 
 def save_working_dir(path):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    CONFIG_PATH.write_text(
-        json.dumps({"working_dir": str(path)}, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    save_config_value("working_dir", path)
 
 
-def browse_for_folder(initial_dir=None):
-    """Open the native OS folder-picker dialog. Returns the chosen path, or
-    '' if the user cancelled/it failed. Only works when the app is run
-    locally (this is a local desktop tool, not something deployed to
-    Streamlit Cloud).
+def load_resident_year_file_choice():
+    """Return the manually-chosen resident_year Excel file, or None if
+    there isn't one yet (or it no longer exists on disk) - in which case
+    the newest data/resident_year_*.xlsx is auto-detected instead."""
 
-    Runs Tk in a separate child process rather than calling it directly:
+    saved = load_config().get("resident_year_file")
+
+    if saved and Path(saved).is_file():
+        return Path(saved)
+
+    return None
+
+
+def save_resident_year_file_choice(path):
+    save_config_value("resident_year_file", path)
+
+
+def _run_tk_dialog(tk_call_lines):
+    """Run a Tk file/folder dialog in a separate child process. Returns
+    the chosen path, or '' if the user cancelled/it failed.
+
     Streamlit executes this script in a worker thread, but Tk's Cocoa
     backend on macOS requires window creation on the real main thread and
     crashes the whole process outright otherwise. A fresh subprocess gets
     its own genuine main thread, sidestepping that restriction (this also
     avoids polluting the Streamlit process with a Tk runtime at all).
+    Only works when the app is run locally, not deployed to a remote host.
     """
 
     script = (
@@ -71,10 +96,7 @@ def browse_for_folder(initial_dir=None):
         "root = tk.Tk()\n"
         "root.withdraw()\n"
         "root.attributes('-topmost', True)\n"
-        "print(filedialog.askdirectory(\n"
-        f"    initialdir={str(initial_dir or Path.home())!r},\n"
-        "    title='Choose the ACGME Autofill working folder',\n"
-        "))\n"
+        + tk_call_lines
     )
 
     try:
@@ -84,12 +106,33 @@ def browse_for_folder(initial_dir=None):
             text=True,
             timeout=300,
         )
-        folder = result.stdout.strip()
+        return result.stdout.strip()
     except Exception as e:
-        st.error(f"Couldn't open the folder picker: {e}")
-        folder = ""
+        st.error(f"Couldn't open the picker dialog: {e}")
+        return ""
 
-    return folder
+
+def browse_for_folder(initial_dir=None):
+    """Open the native OS folder-picker dialog."""
+
+    return _run_tk_dialog(
+        "print(filedialog.askdirectory(\n"
+        f"    initialdir={str(initial_dir or Path.home())!r},\n"
+        "    title='Choose the ACGME Autofill working folder',\n"
+        "))\n"
+    )
+
+
+def browse_for_file(initial_dir=None):
+    """Open the native OS file-picker dialog, filtered to Excel files."""
+
+    return _run_tk_dialog(
+        "print(filedialog.askopenfilename(\n"
+        f"    initialdir={str(initial_dir or Path.home())!r},\n"
+        "    title='Choose the resident_year Excel file',\n"
+        "    filetypes=[('Excel files', '*.xlsx'), ('All files', '*.*')],\n"
+        "))\n"
+    )
 
 
 if "working_dir" not in st.session_state:
@@ -168,11 +211,10 @@ def find_resident_year_file(data_dir):
     return candidates[-1] if candidates else None
 
 
-def load_resident_roster(data_dir):
+def load_resident_roster(path):
     """Load the resident roster (Anesthesiologist / Career starting date /
-    Turned into supervisor), or None if no roster file is found/readable."""
-
-    path = find_resident_year_file(data_dir)
+    Turned into supervisor) from the given Excel file, or None if there is
+    no file or it isn't readable."""
 
     if path is None:
         return None
@@ -1078,7 +1120,36 @@ def row_to_case(row, career_start=None):
 # Streamlit UI
 # ---------------------------------------------------
 
-resident_roster = load_resident_roster(WORKING_DIR / "data")
+if "resident_year_file" not in st.session_state:
+    st.session_state.resident_year_file = load_resident_year_file_choice()
+
+# A manual choice always wins; otherwise auto-detect fresh each run (so a
+# newly-added data/resident_year_*.xlsx is picked up without needing to
+# rebrowse) rather than caching the auto-detected path in session_state.
+resident_year_path = st.session_state.resident_year_file or find_resident_year_file(WORKING_DIR / "data")
+
+with st.sidebar.expander("📄 Resident-year file", expanded=resident_year_path is None):
+    if resident_year_path:
+        st.caption(f"Using: {resident_year_path}")
+    else:
+        st.caption("None found under data/resident_year_*.xlsx - browse to pick one.")
+
+    if st.button("Browse...", key="browse_resident_year"):
+        chosen = browse_for_file(
+            str(resident_year_path.parent) if resident_year_path else str(WORKING_DIR / "data")
+        )
+
+        if chosen:
+            st.session_state.resident_year_file = Path(chosen)
+            save_resident_year_file_choice(chosen)
+            st.rerun()
+
+    if st.session_state.resident_year_file and st.button("Reset to auto-detect", key="reset_resident_year"):
+        st.session_state.resident_year_file = None
+        save_resident_year_file_choice("")
+        st.rerun()
+
+resident_roster = load_resident_roster(resident_year_path)
 
 if resident_roster is not None:
     resident_names = sorted(
@@ -1096,8 +1167,9 @@ if resident_roster is not None:
         st.sidebar.caption("No career start date on file for this resident.")
 else:
     st.sidebar.warning(
-        "No resident roster found (data/resident_year_*.xlsx) - "
-        "Case Year will be left blank for you to set manually."
+        "No resident roster found or couldn't be read - use the "
+        "'Resident-year file' browse button above to pick one. "
+        "Case Year will be left blank until then."
     )
     career_start = None
 
