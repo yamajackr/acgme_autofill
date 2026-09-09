@@ -106,10 +106,24 @@ def fill_login_password(page, password):
         if continue_button.count() == 0:
             continue_button = page.locator('button[type="submit"]')
 
-        if continue_button.count() > 0:
-            continue_button.first.click()
-        else:
+        if continue_button.count() == 0:
             print("  NOT FOUND: 'Continue' button to reach the password screen")
+            return False
+
+        # A disabled Continue button (e.g. because the email step above
+        # didn't actually fill anything) will never become clickable -
+        # .click() would otherwise hang for its full timeout and raise.
+        # is_disabled() is an instant check, no waiting.
+        if continue_button.first.is_disabled():
+            print("  'Continue' button is disabled (email step likely didn't complete) - "
+                  "can't reach the password field automatically.")
+            return False
+
+        try:
+            continue_button.first.click(timeout=5000)
+        except Exception as e:
+            print(f"  Couldn't click 'Continue': {e}")
+            return False
 
     try:
         password_field.wait_for(state="visible", timeout=8000)
@@ -474,14 +488,28 @@ def main():
         # that can keep "networkidle" from ever firing promptly.
         page.goto(ACGME_URL, wait_until="domcontentloaded")
 
-        if click_sign_in(page):
-            fill_login_email(page, LOGIN_EMAIL)
-            fill_login_password(page, LOGIN_PASSWORD)
+        # This whole block is a convenience, never load-bearing: any
+        # failure here (a selector that no longer matches, a timeout, an
+        # unexpected page state) must fall through to manual login rather
+        # than crash the script and lose the whole run - that's exactly
+        # what happened before this fix (an uncaught exception here took
+        # down the browser and every case with it).
+        try:
+            if click_sign_in(page):
+                if fill_login_email(page, LOGIN_EMAIL):
+                    fill_login_password(page, LOGIN_PASSWORD)
+        except Exception as e:
+            print(f"\n  Login automation hit a snag ({e}) - no problem, just log in by hand below.")
 
         input("\nFinish logging in (submit / 2FA), navigate to Add Cases, then press Enter...")
 
         for i, case in enumerate(cases, start=1):
             print(f"\n--- Case {i}/{n}: ID={case.get('case_id')} Date={case.get('case_date')} ---")
+            if case.get("procedure_name"):
+                # Not a real ACGME field - the form has no free-text
+                # procedure name, just printed here so you can sanity-check
+                # the checkboxes against what the case actually was.
+                print(f"    Procedure: {case['procedure_name']}")
             try:
                 page.goto(ACGME_URL, wait_until="domcontentloaded")
                 fill_case(page, case)

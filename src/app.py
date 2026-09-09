@@ -956,6 +956,12 @@ def row_to_case(row, career_start=None):
         ["実施術式名"]
     ))
 
+    # Cleaned up for display only (autofill_acgme.py prints this to the
+    # terminal so you can sanity-check the checkboxes against the actual
+    # procedure) - "^^^^" is a trailing export artifact, not a real
+    # separator (every 実施術式名 value ends with exactly one run of it).
+    procedure_name_display = re.sub(r"\^+$", "", str(procedure_text)).strip()
+
     dept_text = normalize_text(get_col(
         row,
         ["Dpt"]
@@ -979,6 +985,11 @@ def row_to_case(row, career_start=None):
     central_line_text = get_col(
         row,
         ["中心静脈カテーテル挿入_種類"]
+    )
+
+    pa_catheter_text = get_col(
+        row,
+        ["肺動脈カテーテル挿入_穿刺部位"]
     )
 
     block_text = (
@@ -1015,9 +1026,19 @@ def row_to_case(row, career_start=None):
     )
     block_continuous = any_block_site and block_is_continuous(block_catheter_text)
 
+    # CSE (Combined Spinal-Epidural) is its own distinct technique, not
+    # "Spinal AND Epidural both checked" - the text matching a CSE case
+    # (e.g. "脊麻+硬麻") also independently matches the plain spinal/
+    # epidural keyword checks, so exclude those explicitly once CSE fires.
+    is_cse = anesthesia_to_cse(anesthesia_text)
+
     return {
 
         "case_id": str(get_col(row, ["ID"], "")),
+
+        # Informational only - not registered anywhere in the ACGME form,
+        # just printed to the terminal by autofill_acgme.py for reference.
+        "procedure_name": procedure_name_display,
 
         "case_date": excel_date_to_acgme(
             case_date_raw
@@ -1051,9 +1072,7 @@ def row_to_case(row, career_start=None):
             anesthesia_text
         ),
 
-        "spinal": anesthesia_to_spinal(
-            anesthesia_text
-        ),
+        "spinal": anesthesia_to_spinal(anesthesia_text) and not is_cse,
 
         # Also true whenever an epidural site was actually documented
         # (硬膜外カテーテル挿入_穿刺部位), even if 実施麻酔法 doesn't
@@ -1063,13 +1082,11 @@ def row_to_case(row, career_start=None):
         # the Neuraxial Blockade Site checkboxes below (T 8-12 etc.) are
         # sub-selections of Epidural, and the ACGME page's own JS rejects
         # checking a site whose parent technique isn't checked.
-        "epidural": anesthesia_to_epidural(anesthesia_text) or cell_is_filled(
-            epidural_site_text
-        ),
+        "epidural": (
+            anesthesia_to_epidural(anesthesia_text) or cell_is_filled(epidural_site_text)
+        ) and not is_cse,
 
-        "cse": anesthesia_to_cse(
-            anesthesia_text
-        ),
+        "cse": is_cse,
 
         "pn_block_continuous": block_continuous,
 
@@ -1125,6 +1142,10 @@ def row_to_case(row, career_start=None):
 
         "central_line": cell_is_filled(
             central_line_text
+        ),
+
+        "pa_catheter": cell_is_filled(
+            pa_catheter_text
         ),
 
         "cardiac_with_cpb": required_case_to_cardiac_with_cpb(
@@ -1268,7 +1289,14 @@ if uploaded:
         for c in df.columns
     ]
 
-    st.dataframe(df)
+    # For display only: st.dataframe's Arrow serialization chokes on
+    # "object" columns that mix real Python types cell-to-cell (e.g. ASAPS
+    # has both int 2 and string "2E" depending on the row) - df itself is
+    # untouched, so row_to_case below still sees the original values.
+    display_df = df.astype(
+        {col: str for col in df.select_dtypes(include="object").columns}
+    )
+    st.dataframe(display_df)
 
     # Default "From row" to the first row not yet marked in the "Done"
     # column, so you don't have to hunt for where you left off each time.
