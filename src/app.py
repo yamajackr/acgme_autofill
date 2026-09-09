@@ -10,11 +10,125 @@ import pandas as pd
 import streamlit as st
 
 
-CASES_JSON = Path("cases_to_fill.json")
 AUTOFILL_SCRIPT = Path(__file__).parent / "autofill_acgme.py"
+
+# Where the chosen working folder is remembered, per machine/user - not in
+# the project folder, so it isn't affected by git and survives regardless
+# of where this repo happens to be checked out.
+CONFIG_PATH = Path.home() / ".acgme_autofill" / "config.json"
 
 st.set_page_config(layout="wide")
 st.title("ACGME Case Log Helper")
+
+
+# ---------------------------------------------------
+# Working folder (data/ and cases_to_fill.json live here)
+# ---------------------------------------------------
+
+def load_working_dir():
+    """Return the previously-chosen working folder, or None if there isn't
+    one yet (or it no longer exists on disk)."""
+
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        saved = config.get("working_dir")
+
+        if saved and Path(saved).is_dir():
+            return Path(saved)
+
+    except Exception:
+        pass
+
+    return None
+
+
+def save_working_dir(path):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    CONFIG_PATH.write_text(
+        json.dumps({"working_dir": str(path)}, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def browse_for_folder(initial_dir=None):
+    """Open the native OS folder-picker dialog. Returns the chosen path, or
+    '' if the user cancelled/it failed. Only works when the app is run
+    locally (this is a local desktop tool, not something deployed to
+    Streamlit Cloud).
+
+    Runs Tk in a separate child process rather than calling it directly:
+    Streamlit executes this script in a worker thread, but Tk's Cocoa
+    backend on macOS requires window creation on the real main thread and
+    crashes the whole process outright otherwise. A fresh subprocess gets
+    its own genuine main thread, sidestepping that restriction (this also
+    avoids polluting the Streamlit process with a Tk runtime at all).
+    """
+
+    script = (
+        "import tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.attributes('-topmost', True)\n"
+        "print(filedialog.askdirectory(\n"
+        f"    initialdir={str(initial_dir or Path.home())!r},\n"
+        "    title='Choose the ACGME Autofill working folder',\n"
+        "))\n"
+    )
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        folder = result.stdout.strip()
+    except Exception as e:
+        st.error(f"Couldn't open the folder picker: {e}")
+        folder = ""
+
+    return folder
+
+
+if "working_dir" not in st.session_state:
+    st.session_state.working_dir = load_working_dir()
+
+with st.expander(
+    "📁 Working folder" if st.session_state.working_dir else "📁 Choose your working folder (first time only)",
+    expanded=st.session_state.working_dir is None,
+):
+    if st.session_state.working_dir:
+        st.caption(f"Current: {st.session_state.working_dir}")
+    else:
+        st.info(
+            "Choose a folder to hold your `data/` (Excel files) and "
+            "`cases_to_fill.json`. This is only asked once - it's "
+            "remembered for next time."
+        )
+
+    if st.button("Browse..."):
+        chosen = browse_for_folder(
+            str(st.session_state.working_dir) if st.session_state.working_dir else None
+        )
+
+        if chosen:
+            st.session_state.working_dir = Path(chosen)
+            save_working_dir(chosen)
+            st.rerun()
+
+if st.session_state.working_dir is None:
+    st.stop()
+    # st.stop() halts a real `streamlit run` session right here, but it's
+    # a no-op outside one (e.g. `import app` for testing/bare mode) - fall
+    # back to the project folder so that doesn't crash on WORKING_DIR
+    # being None. A real session never reaches the next line in this case.
+    WORKING_DIR = Path(__file__).resolve().parent.parent
+else:
+    WORKING_DIR = st.session_state.working_dir
+
+CASES_JSON = WORKING_DIR / "cases_to_fill.json"
 
 
 # ---------------------------------------------------
@@ -46,19 +160,19 @@ SUPERVISOR_MAP = {
 # name is picked from a dropdown (see the Streamlit UI section below)
 # rather than hardcoded - that's what lets other residents use this too.
 
-def find_resident_year_file():
-    """Pick the most recently dated data/resident_year_*.xlsx file."""
+def find_resident_year_file(data_dir):
+    """Pick the most recently dated <data_dir>/resident_year_*.xlsx file."""
 
-    candidates = sorted(Path("data").glob("resident_year_*.xlsx"))
+    candidates = sorted(data_dir.glob("resident_year_*.xlsx"))
 
     return candidates[-1] if candidates else None
 
 
-def load_resident_roster():
+def load_resident_roster(data_dir):
     """Load the resident roster (Anesthesiologist / Career starting date /
     Turned into supervisor), or None if no roster file is found/readable."""
 
-    path = find_resident_year_file()
+    path = find_resident_year_file(data_dir)
 
     if path is None:
         return None
@@ -964,7 +1078,7 @@ def row_to_case(row, career_start=None):
 # Streamlit UI
 # ---------------------------------------------------
 
-resident_roster = load_resident_roster()
+resident_roster = load_resident_roster(WORKING_DIR / "data")
 
 if resident_roster is not None:
     resident_names = sorted(
@@ -1071,9 +1185,9 @@ if uploaded:
             encoding="utf-8"
         )
 
-        subprocess.Popen([
-            sys.executable,
-            str(AUTOFILL_SCRIPT)
-        ])
+        subprocess.Popen(
+            [sys.executable, str(AUTOFILL_SCRIPT)],
+            cwd=str(WORKING_DIR),
+        )
 
         st.info("Autofill launched")
