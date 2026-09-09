@@ -1,4 +1,5 @@
 import json
+import platform
 import re
 import sys
 import time
@@ -6,9 +7,12 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-ACGME_URL = "https://apps.acgme-i.org/ads/CaseLogs/CaseEntry/Insert"
+ACGME_URL = "https://apps.acgme.org/ads/CaseLogs/CaseEntry/Insert"
 ACGME_LOGIN_EMAIL = "yamamoto.ryosuke@kameda.jp"
 JSON_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("cases_to_fill.json")
+
+# "Select all" is Cmd+A on macOS, Ctrl+A everywhere else (Windows/Linux).
+SELECT_ALL_KEY = "Meta+A" if platform.system() == "Darwin" else "Control+A"
 
 # Keep False until you have verified the form is filled correctly.
 AUTO_SUBMIT = False
@@ -105,7 +109,7 @@ def fill_date(page, date_text):
     container = page.locator("div.ProcedureDate")
     date_input = container.locator("input")
     date_input.click()
-    date_input.press("Meta+A")  # Mac. For Windows, use Control+A.
+    date_input.press(SELECT_ALL_KEY)
     date_input.fill(str(date_text))
 
     synced = container.evaluate(
@@ -416,8 +420,10 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=250)
         page = browser.new_page()
-        page.goto(ACGME_URL)
-        page.wait_for_load_state("networkidle")
+        # domcontentloaded rather than waiting for full networkidle - the
+        # ACGME site keeps background connections open (analytics, polling)
+        # that can keep "networkidle" from ever firing promptly.
+        page.goto(ACGME_URL, wait_until="domcontentloaded")
 
         if click_sign_in(page):
             fill_login_email(page, ACGME_LOGIN_EMAIL)
@@ -427,8 +433,7 @@ def main():
         for i, case in enumerate(cases, start=1):
             print(f"\n--- Case {i}/{n}: ID={case.get('case_id')} Date={case.get('case_date')} ---")
             try:
-                page.goto(ACGME_URL)
-                page.wait_for_load_state("networkidle")
+                page.goto(ACGME_URL, wait_until="domcontentloaded")
                 fill_case(page, case)
                 submit_or_pause(page, i, n)
             except Exception as e:

@@ -221,7 +221,11 @@ def load_resident_roster(path):
 
     try:
         roster = pd.read_excel(path)
-    except Exception:
+    except Exception as e:
+        # Surface the real reason (e.g. a missing dependency like
+        # openpyxl, or a corrupt file) instead of silently swallowing it -
+        # that previously showed up as a misleading "no roster found".
+        st.sidebar.error(f"Couldn't read {path.name}: {e}")
         return None
 
     if "Anesthesiologist" not in roster.columns:
@@ -806,6 +810,14 @@ def surgery_to_vaginal_delivery(dept, procedure_text):
     )
 
 
+def dept_to_endovascular_intracerebral(dept):
+    """Dpt = '脳血管内治療科' (neuroendovascular therapy dept) means the
+    procedure is intracerebral endovascular, regardless of what the
+    procedure name itself says."""
+
+    return "脳血管内治療科" in str(dept)
+
+
 # ---------------------------------------------------
 # Neuraxial site mapping
 # ---------------------------------------------------
@@ -1084,6 +1096,10 @@ def row_to_case(row, career_start=None):
 
         "major_vessels_endo": surgery_to_major_vessels_endo(
             procedure_text
+        ),
+
+        "endovascular_intracerebral": dept_to_endovascular_intracerebral(
+            dept_text
         ),
 
         "nonvascular_open": surgery_to_nonvascular_open(procedure_text) or required_case_to_nonvascular_open(
