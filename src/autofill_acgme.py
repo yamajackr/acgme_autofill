@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 ACGME_URL = "https://apps.acgme.org/ads/CaseLogs/CaseEntry/Insert"
 JSON_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("cases_to_fill.json")
@@ -63,6 +63,64 @@ def wait(sec=0.4):
 def css_escape_double_quote(text):
     return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
+
+
+def tolerant_goto(page, url, timeout=30000):
+    """Navigate without crashing when ACGME immediately redirects mid-goto.
+
+    On some Windows/Chromium setups the ACGME case-log URL starts one
+    navigation and Azure B2C starts a second navigation before Playwright has
+    received the first DOMContentLoaded event. Playwright reports that normal
+    authentication redirect as an "interrupted by another navigation" error.
+    Treat only that specific race as expected, then wait briefly for the
+    redirect target to settle.
+    """
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    except PlaywrightError as e:
+        if "interrupted by another navigation" not in str(e).lower():
+            raise
+        print("  Navigation was interrupted by an ACGME login redirect; waiting for the redirect to settle...")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        wait(0.8)
+
+
+def goto_case_entry(page):
+    """Open the ACGME Case Entry page, with a manual-login fallback.
+
+    If an expired/not-yet-established session redirects to ACGME Cloud, keep
+    the browser open rather than crashing. After the user completes login once,
+    retry the Case Entry URL.
+    """
+    for attempt in range(2):
+        tolerant_goto(page, ACGME_URL)
+        current = page.url.lower()
+
+        if "apps.acgme.org" in current and "/caselogs/caseentry" in current:
+            return
+
+        if "acgmecloud.org" in current or "onmicrosoft.com" in current:
+            print("\n  ACGME redirected to the login page instead of Case Entry.")
+            input("  Finish login/2FA in the browser, then press Enter here to retry Case Entry...")
+            continue
+
+        # ACGME can briefly land on another apps.acgme.org page while its own
+        # redirect chain finishes. Give it a moment before retrying.
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        wait(0.8)
+
+    # Final attempt: if this still does not reach Case Entry, leave a useful
+    # error rather than failing later on a missing form selector.
+    tolerant_goto(page, ACGME_URL)
+    current = page.url
+    if "apps.acgme.org" not in current.lower() or "/caselogs/caseentry" not in current.lower():
+        raise RuntimeError(f"Could not reach the ACGME Case Entry page after login. Current URL: {current}")
 
 def click_sign_in(page):
     """Click the ADS 'Sign In' button/link that leads to the ACGME Cloud
@@ -647,7 +705,7 @@ def main():
         # domcontentloaded rather than waiting for full networkidle - the
         # ACGME site keeps background connections open (analytics, polling)
         # that can keep "networkidle" from ever firing promptly.
-        page.goto(ACGME_URL, wait_until="domcontentloaded")
+        tolerant_goto(page, ACGME_URL)
 
         # This whole block is a convenience, never load-bearing: any
         # failure here (a selector that no longer matches, a timeout, an
@@ -672,7 +730,7 @@ def main():
                 # the checkboxes against what the case actually was.
                 print(f"    Procedure: {case['procedure_name']}")
             try:
-                page.goto(ACGME_URL, wait_until="domcontentloaded")
+                goto_case_entry(page)
                 fill_case(page, case)
                 submit_or_pause(page, i, n, submit_mode)
             except Exception as e:
