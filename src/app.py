@@ -1355,6 +1355,19 @@ if uploaded:
             f"Saved {len(cases)} cases"
         )
 
+    submit_mode_label = st.radio(
+        "Submission mode",
+        ["Manual submit", "Auto submit"],
+        horizontal=True,
+        index=0,
+        help=(
+            "Manual submit: autofill each case, then review and submit it yourself. "
+            "Auto submit: submit automatically; if ACGME reports a required-field error, "
+            "the autofill script falls back to manual completion for that case."
+        ),
+    )
+    submit_mode = "manual" if submit_mode_label == "Manual submit" else "auto"
+
     if st.button("Launch Autofill"):
 
         CASES_JSON.write_text(
@@ -1367,8 +1380,15 @@ if uploaded:
         )
 
         subprocess.Popen(
-            [sys.executable, str(AUTOFILL_SCRIPT), str(CASES_JSON), selected_login_email, selected_login_password],
+            [
+                sys.executable,
+                str(AUTOFILL_SCRIPT),
+                str(CASES_JSON),
+                selected_login_email,
+                selected_login_password,
+                submit_mode,
+            ],
             cwd=str(WORKING_DIR),
         )
 
-        st.info("Autofill launched")
+        st.info(f"Autofill launched ({submit_mode} submit)")

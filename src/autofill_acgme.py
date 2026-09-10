@@ -3,6 +3,7 @@ import platform
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -21,8 +22,38 @@ LOGIN_PASSWORD = sys.argv[3] if len(sys.argv) > 3 else ""
 # "Select all" is Cmd+A on macOS, Ctrl+A everywhere else (Windows/Linux).
 SELECT_ALL_KEY = "Meta+A" if platform.system() == "Darwin" else "Control+A"
 
-# Keep False until you have verified the form is filled correctly.
-AUTO_SUBMIT = False
+# Submission mode.
+#   "manual" = fill the case, then you review/click Submit yourself.
+#   "auto"   = submit automatically; if ACGME reports a required field,
+#              the script pauses and lets you complete that case manually.
+#   "ask"    = choose Manual or Auto once when the script starts.
+#
+# You can also override this with a 4th command-line argument:
+#   python autofill_acgme.py cases_to_fill.json EMAIL PASSWORD manual
+#   python autofill_acgme.py cases_to_fill.json EMAIL PASSWORD auto
+SUBMIT_MODE = sys.argv[4].strip().lower() if len(sys.argv) > 4 else "ask"
+
+
+def choose_submit_mode():
+    """Resolve manual/auto submission mode once at startup."""
+    mode = SUBMIT_MODE
+    if mode in {"manual", "m"}:
+        return "manual"
+    if mode in {"auto", "a"}:
+        return "auto"
+
+    # Interactive switch. Default to manual for safety.
+    print("\nSubmission mode:")
+    print("  [1] Manual submit  - review each case and click Submit yourself")
+    print("  [2] Auto submit    - submit automatically; required-field errors fall back to manual")
+    try:
+        answer = input("Choose 1 or 2 [default: 1]: ").strip().lower()
+    except (EOFError, OSError):
+        answer = ""
+
+    if answer in {"2", "a", "auto"}:
+        return "auto"
+    return "manual"
 
 
 def wait(sec=0.4):
@@ -150,46 +181,78 @@ def fill_case_id(page, case_id):
 
 
 def fill_date(page, date_text):
-    """Fill Case Date safely despite the datepicker popup.
+    """Set Case Date through the page's Bootstrap datepicker API.
 
-    The Case Date field (div.ProcedureDate) is a bootstrap-datepicker
-    widget. It rejects/ignores real keystrokes typed into the input, and it
-    never listens for a plain 'change' event - it only syncs its internal
-    "active date" through its own keyup handling or its jQuery plugin API.
-    So .fill() lands the text visually, but the plugin still thinks the
-    active date is today, and pressing Enter/Escape (or clicking anywhere,
-    which the open calendar popup intercepts anyway) confirms that stale
-    "today" and overwrites our typed value.
-
-    Fix: set the value with .fill(), then tell the plugin directly, via its
-    own jQuery API, to re-parse the input and close - this bypasses the
-    popup interception entirely instead of guessing at keys/clicks.
+    Direct typing can leave the datepicker's internal selected date out of
+    sync with the visible input.  Set the actual datepicker date instead,
+    then verify the input value.
     """
     if not date_text:
         return
 
-    print(f"  fill Case Date: {date_text}")
+    expected = str(date_text).strip()
+    print(f"  fill Case Date: {expected}")
+
+    # Normalize to M/D/YYYY before handing it to JavaScript.
+    try:
+        dt = datetime.strptime(expected, "%m/%d/%Y")
+    except ValueError:
+        try:
+            dt = datetime.strptime(expected, "%m/%d/%y")
+        except ValueError as e:
+            raise ValueError(f"Unsupported Case Date format: {expected!r}") from e
+
+    month, day, year = dt.month, dt.day, dt.year
+    normalized = f"{month}/{day}/{year}"
+
     container = page.locator("div.ProcedureDate")
-    date_input = container.locator("input")
-    date_input.click()
-    date_input.press(SELECT_ALL_KEY)
-    date_input.fill(str(date_text))
+    date_input = container.locator("input").first
+    date_input.wait_for(state="visible", timeout=10000)
 
-    synced = container.evaluate(
-        """el => {
+    result = container.evaluate(
+        """(el, parts) => {
             const $ = window.jQuery || window.$;
-            if (!$ || typeof $(el).datepicker !== 'function') return false;
-            $(el).datepicker('update');
-            $(el).datepicker('hide');
-            return true;
-        }"""
-    )
-    if not synced:
-        print("  WARNING: could not reach bootstrap-datepicker's jQuery API; "
-              "falling back to Escape (date may revert to today - verify!)")
-        page.keyboard.press("Escape")
+            const input = el.querySelector('input');
+            if (!input) return {ok:false, reason:'no input'};
 
-    wait()
+            // Use noon to avoid any midnight / DST edge case.
+            const d = new Date(parts.year, parts.month - 1, parts.day, 12, 0, 0);
+
+            if ($ && typeof $(el).datepicker === 'function') {
+                try {
+                    $(el).datepicker('setDate', d);
+                    $(el).datepicker('update', d);
+                    $(el).datepicker('hide');
+                    input.dispatchEvent(new Event('input', {bubbles:true}));
+                    input.dispatchEvent(new Event('change', {bubbles:true}));
+                    return {ok:true, value:input.value};
+                } catch (e) {
+                    return {ok:false, reason:String(e)};
+                }
+            }
+
+            // Fallback if the plugin is not reachable.
+            input.value = parts.normalized;
+            input.dispatchEvent(new Event('input', {bubbles:true}));
+            input.dispatchEvent(new Event('change', {bubbles:true}));
+            return {ok:true, value:input.value, fallback:true};
+        }""",
+        {"year": year, "month": month, "day": day, "normalized": normalized},
+    )
+
+    # Ensure the calendar popup is gone and the field has committed.
+    page.keyboard.press("Escape")
+    date_input.blur()
+    wait(0.25)
+
+    current = date_input.input_value().strip()
+    accepted = {normalized, f"{month:02d}/{day:02d}/{year}"}
+    if current not in accepted:
+        raise RuntimeError(
+            f"Case Date did not stick: expected {normalized!r}, got {current!r}; JS result={result}"
+        )
+
+    print(f"  Case Date verified: {current}")
 
 
 def safe_select(page, selector, label):
@@ -459,13 +522,108 @@ def fill_case(page, case):
     verify_date(page, case.get("case_date"))
 
 
-def submit_or_pause(page, i, n):
-    if AUTO_SUBMIT:
-        page.locator("#submitButton").click()
-        page.wait_for_load_state("networkidle")
-        wait(1)
-    else:
+def get_validation_messages(page):
+    """Return only actual ACGME form-validation messages.
+
+    Avoid reading the text of invalid <input>/<select> elements themselves,
+    because a <select> can expose its entire option list as inner_text().
+    """
+    selectors = [
+        ".field-validation-error:visible",
+        ".validation-summary-errors:visible li",
+        ".alert-danger:visible",
+    ]
+
+    messages = []
+    for selector in selectors:
+        locator = page.locator(selector)
+        for j in range(locator.count()):
+            try:
+                txt = locator.nth(j).inner_text().strip()
+            except Exception:
+                continue
+            if txt and txt not in messages:
+                messages.append(txt)
+
+    return messages
+
+
+def manual_completion(page, i, n, messages=None):
+    """Pause so the user can complete any required fields and submit by hand.
+
+    This is used when ACGME rejects an otherwise autofilled case because a
+    required value could not be filled automatically (for example an
+    attending/supervisor not present in the source mapping).
+    """
+    print(f"\n  MANUAL COMPLETION NEEDED for case {i}/{n}.")
+    if messages:
+        print("  ACGME validation message(s):")
+        for msg in messages:
+            print(f"    - {msg}")
+
+    while True:
+        answer = input(
+            "  Complete the required field(s) in the browser and click Submit/Update manually.\n"
+            "  After the case has been submitted, press Enter here to continue "
+            "(or type 'skip' to continue without re-checking): "
+        ).strip().lower()
+
+        if answer == "skip":
+            print(f"  continuing after manual handling of case {i}/{n}")
+            return
+
+        # If the page navigated after a successful manual submission, these
+        # validation elements will normally be gone. If ACGME still shows an
+        # error, keep the browser open and let the user correct it again.
+        remaining = get_validation_messages(page)
+        if not remaining:
+            print(f"  manual submission completed for case {i}/{n}")
+            return
+
+        print("  ACGME still shows required/validation message(s):")
+        for msg in remaining:
+            print(f"    - {msg}")
+
+
+def submit_or_pause(page, i, n, submit_mode):
+    if submit_mode == "manual":
         input(f"\nCase {i}/{n} filled. Review and submit in browser, then press Enter to continue...")
+        return
+
+    # If a required-field error is already visible, don't crash. Leave the
+    # browser open so the missing value can be supplied and submitted manually.
+    messages = get_validation_messages(page)
+    if messages:
+        manual_completion(page, i, n, messages)
+        return
+
+    submit = page.locator("#submitButton")
+    if submit.count() == 0:
+        submit = page.get_by_role("button", name=re.compile(r"^(Submit|Update|Save)$", re.I))
+    if submit.count() == 0:
+        print("  Could not find the ACGME submit/update button automatically.")
+        manual_completion(page, i, n, ["Submit/Update button was not found automatically."])
+        return
+
+    print(f"  submitting case {i}/{n}...")
+    submit.first.scroll_into_view_if_needed()
+    submit.first.click()
+
+    # The site may navigate, refresh, or stay on the same URL.
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+    wait(1.0)
+
+    # If ACGME rejects the automatic submission because a required field is
+    # incomplete, switch to manual completion instead of terminating the run.
+    messages = get_validation_messages(page)
+    if messages:
+        manual_completion(page, i, n, messages)
+        return
+
+    print(f"  submitted case {i}/{n}")
 
 
 def main():
@@ -479,6 +637,9 @@ def main():
 
     n = len(cases)
     print(f"Loaded {n} case(s) from {JSON_PATH}")
+
+    submit_mode = choose_submit_mode()
+    print(f"Submission mode selected: {submit_mode.upper()}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=250)
@@ -513,7 +674,7 @@ def main():
             try:
                 page.goto(ACGME_URL, wait_until="domcontentloaded")
                 fill_case(page, case)
-                submit_or_pause(page, i, n)
+                submit_or_pause(page, i, n, submit_mode)
             except Exception as e:
                 if "closed" not in str(e).lower():
                     raise
