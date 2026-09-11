@@ -312,15 +312,14 @@ def get_resident_password(roster, resident_name):
 
 
 PROGRAM_YEARS_COLUMN_CANDIDATES = ("Program Years", "Total Years", "Program Length", "研修年数")
-DEFAULT_PROGRAM_YEARS = 3
+DEFAULT_PROGRAM_YEARS = 4
 
 
 def get_program_years(roster, resident_name):
     """Length of this resident's program in years (Case Year's upper
-    bound), from the roster. Defaults to 3 (the standard anesthesiology
-    residency) if there's no such column, no value, or it doesn't parse -
-    most residents don't need this column at all, only ones on a longer
-    (e.g. 4-year) track."""
+    bound), from the roster. Defaults to DEFAULT_PROGRAM_YEARS if there's
+    no such column, no value, or it doesn't parse - the column only needs
+    to be set for a resident whose cap should differ from the default."""
 
     raw = lookup_resident_field(roster, resident_name, PROGRAM_YEARS_COLUMN_CANDIDATES)
 
@@ -357,6 +356,21 @@ def get_col(row, possible_names, default=""):
                 return value
 
     return default
+
+
+def format_id(x):
+    """Format an ID cell as a clean string. A numeric ID column with any
+    blank cell elsewhere gets upcast by pandas to float64, so a clean ID
+    like 527947 arrives here as 527947.0 - str() alone would keep that
+    trailing '.0'."""
+
+    if pd.isna(x) or x == "":
+        return ""
+
+    if isinstance(x, float) and x.is_integer():
+        return str(int(x))
+
+    return str(x).strip()
 
 
 def normalize_text(x):
@@ -417,10 +431,10 @@ def excel_date_to_acgme(x):
 
 def compute_case_year(case_date_raw, career_start, turned_into_supervisor=None, max_year=DEFAULT_PROGRAM_YEARS):
     """Training year the case falls in, counted in whole years from
-    career_start's anniversary date, clamped to [1, max_year] (3 for a
-    standard residency, or whatever a longer program's roster row says).
-    Returns '' if it can't be computed, so the ACGME page's own default is
-    left in place rather than guessed.
+    career_start's anniversary date, clamped to [1, max_year]
+    (DEFAULT_PROGRAM_YEARS unless the roster overrides it for this
+    resident). Returns '' if it can't be computed, so the ACGME page's
+    own default is left in place rather than guessed.
 
     Also returns '' for a case dated on/after turned_into_supervisor - by
     then they're no longer a resident, so clamping an overflow year down
@@ -481,19 +495,36 @@ def asa_is_emergency(x):
 
 
 # Excluded from random imputation below - they're the two most recently
-# promoted supervisors (2025-04-01), so picking them for an arbitrary case
-# with an unknown supervisor is less plausible than picking someone who's
-# been supervising longer.
-RANDOM_SUPERVISOR_EXCLUDE = {"大熊", "竹下"}
+# Okuma and Takeshita are themselves former residents who each turned into
+# a supervisor on 2025-04-01. When the resident whose log this is happens
+# to be one of them, exclude both from being identified/imputed as their
+# own supervisor - self-supervision (or, before 2025-04-01, peer
+# "supervision" between the two of them while both were still residents)
+# isn't plausible. For anyone else's log, they're legitimate attendings
+# and stay eligible.
+SELF_SUPERVISION_GROUP = {"大熊", "竹下"}
 
 
-def detect_supervisor(x, seed=None, impute=True):
+def supervisor_exclusions_for(resident_name):
+    """Which SUPERVISOR_MAP entries (by surname key) should be excluded
+    from supervisor detection/imputation for this resident's own log."""
+
+    text = resident_name or ""
+
+    if any(name in text for name in SELF_SUPERVISION_GROUP):
+        return SELF_SUPERVISION_GROUP
+
+    return set()
+
+
+def detect_supervisor(x, seed=None, impute=True, exclude=None):
     """Identify the supervisor from the raw Anesthesiologist text. If none
-    can be identified (blank cell, or text that doesn't match anyone in
-    SUPERVISOR_MAP) and impute=True, impute one at random from the usual
-    supervising group rather than leave the case with no supervisor at
-    all. With impute=False, an unidentified supervisor is just left ''
-    instead, e.g. to review the real gaps before deciding.
+    can be identified (blank cell, text that doesn't match anyone in
+    SUPERVISOR_MAP, or only matches someone in `exclude`) and impute=True,
+    impute one at random from the usual supervising group (also excluding
+    `exclude`) rather than leave the case with no supervisor at all. With
+    impute=False, an unidentified supervisor is just left '' instead, e.g.
+    to review the real gaps before deciding.
 
     The pick is deterministic per `seed` (pass the case's own ID) rather
     than a fresh random pick every call - Streamlit reruns this whole
@@ -501,10 +532,15 @@ def detect_supervisor(x, seed=None, impute=True):
     show one name in the preview and save a different one.
     """
 
+    exclude = exclude or set()
+
     if not pd.isna(x):
         text = str(x)
 
         for jp_name, acgme_name in SUPERVISOR_MAP.items():
+
+            if jp_name in exclude:
+                continue
 
             if jp_name in text:
                 return acgme_name
@@ -515,7 +551,7 @@ def detect_supervisor(x, seed=None, impute=True):
     candidates = [
         acgme_name
         for jp_name, acgme_name in SUPERVISOR_MAP.items()
-        if jp_name not in RANDOM_SUPERVISOR_EXCLUDE
+        if jp_name not in exclude
     ]
 
     return random.Random(seed).choice(candidates)
@@ -993,7 +1029,7 @@ def neuraxial_site_lumbar(x):
 # Main conversion
 # ---------------------------------------------------
 
-def row_to_case(row, career_start=None, turned_into_supervisor=None, max_year=DEFAULT_PROGRAM_YEARS, impute_supervisor=True):
+def row_to_case(row, career_start=None, turned_into_supervisor=None, max_year=DEFAULT_PROGRAM_YEARS, impute_supervisor=True, resident_name=None):
 
     case_date_raw = get_col(
         row,
@@ -1108,7 +1144,7 @@ def row_to_case(row, career_start=None, turned_into_supervisor=None, max_year=DE
 
     return {
 
-        "case_id": str(get_col(row, ["ID"], "")),
+        "case_id": format_id(get_col(row, ["ID"], "")),
 
         # Informational only - not registered anywhere in the ACGME form,
         # just printed to the terminal by autofill_acgme.py for reference.
@@ -1125,7 +1161,10 @@ def row_to_case(row, career_start=None, turned_into_supervisor=None, max_year=DE
         "site": "Kameda Medical Center",
 
         "supervisor": detect_supervisor(
-            get_col(row, ["Anesthesiologist"]), seed=row.name, impute=impute_supervisor
+            get_col(row, ["Anesthesiologist"]),
+            seed=row.name,
+            impute=impute_supervisor,
+            exclude=supervisor_exclusions_for(resident_name),
         ),
 
         "patient_age": age_to_acgme_patient_type(
@@ -1333,7 +1372,10 @@ if resident_roster is not None:
     program_years = get_program_years(resident_roster, selected_resident)
 
     if program_years != DEFAULT_PROGRAM_YEARS:
-        st.sidebar.caption(f"Program length: {program_years} years (Case Year capped here instead of 3)")
+        st.sidebar.caption(
+            f"Program length: {program_years} years "
+            f"(Case Year capped here instead of the default {DEFAULT_PROGRAM_YEARS})"
+        )
 
     selected_login_email = get_resident_email(resident_roster, selected_resident)
 
@@ -1358,6 +1400,7 @@ else:
         "'Resident-year file' browse button above to pick one. "
         "Case Year will be left blank until then."
     )
+    selected_resident = None
     career_start = None
     turned_into_supervisor = None
     program_years = DEFAULT_PROGRAM_YEARS
@@ -1429,7 +1472,7 @@ if uploaded:
     ]
 
     cases = [
-        row_to_case(row, career_start, turned_into_supervisor, program_years, impute_supervisor)
+        row_to_case(row, career_start, turned_into_supervisor, program_years, impute_supervisor, selected_resident)
         for _, row in selected.iterrows()
     ]
 
