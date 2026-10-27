@@ -1,8 +1,10 @@
 import json
 import random
 import re
+import shlex
 import subprocess
 import sys
+import platform
 import unicodedata
 from datetime import datetime, date
 from pathlib import Path
@@ -12,6 +14,8 @@ import streamlit as st
 
 
 AUTOFILL_SCRIPT = Path(__file__).parent / "autofill_acgme.py"
+if not AUTOFILL_SCRIPT.exists():
+    AUTOFILL_SCRIPT = Path(__file__).parent / "autofill_acgme(6).py"
 
 # Where the chosen working folder is remembered, per machine/user - not in
 # the project folder, so it isn't affected by git and survives regardless
@@ -20,6 +24,37 @@ CONFIG_PATH = Path.home() / ".acgme_autofill" / "config.json"
 
 st.set_page_config(layout="wide")
 st.title("ACGME Case Log Helper")
+
+
+def create_desktop_shortcut():
+    """Create a double-clickable macOS launcher for this local Streamlit app."""
+    if platform.system() != "Darwin":
+        raise RuntimeError("Desktop shortcut creation currently supports macOS only.")
+
+    desktop = Path.home() / "Desktop"
+    if not desktop.is_dir():
+        raise RuntimeError(f"Desktop folder not found: {desktop}")
+
+    app_file = Path(__file__).resolve()
+    launcher = desktop / "ACGME Case Log Helper.command"
+    content = (
+        "#!/bin/bash\n"
+        f"cd {shlex.quote(str(app_file.parent))} || exit 1\n"
+        f"{shlex.quote(sys.executable)} -m streamlit run {shlex.quote(str(app_file))} "
+        "--server.headless false\n"
+    )
+    launcher.write_text(content, encoding="utf-8")
+    launcher.chmod(0o755)
+    return launcher
+
+
+with st.sidebar:
+    if st.button("Create Desktop Shortcut", help="Mac: add a double-clickable launcher to your Desktop"):
+        try:
+            shortcut_path = create_desktop_shortcut()
+            st.success(f"Shortcut created: {shortcut_path.name}")
+        except Exception as exc:
+            st.error(f"Could not create shortcut: {exc}")
 
 
 # ---------------------------------------------------
