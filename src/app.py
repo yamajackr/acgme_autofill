@@ -27,29 +27,58 @@ st.title("ACGME Case Log Helper")
 
 
 def create_desktop_shortcut():
-    """Create a double-clickable macOS launcher for this local Streamlit app."""
-    if platform.system() != "Darwin":
-        raise RuntimeError("Desktop shortcut creation currently supports macOS only.")
-
+    """Create a desktop launcher using the current Python environment."""
+    system = platform.system()
     desktop = Path.home() / "Desktop"
+    if system == "Windows":
+        # The Desktop may have been redirected to OneDrive or another folder.
+        try:
+            import os
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ) as key:
+                desktop = Path(os.path.expandvars(winreg.QueryValueEx(key, "Desktop")[0]))
+        except (OSError, ImportError):
+            pass
+    elif system != "Darwin":
+        raise RuntimeError("Desktop shortcut creation supports macOS and Windows only.")
+
     if not desktop.is_dir():
         raise RuntimeError(f"Desktop folder not found: {desktop}")
 
     app_file = Path(__file__).resolve()
-    launcher = desktop / "ACGME Case Log Helper.command"
-    content = (
-        "#!/bin/bash\n"
-        f"cd {shlex.quote(str(app_file.parent))} || exit 1\n"
-        f"{shlex.quote(sys.executable)} -m streamlit run {shlex.quote(str(app_file))} "
-        "--server.headless false\n"
-    )
+    if system == "Windows":
+        launcher = desktop / "ACGME Case Log Helper.cmd"
+        # Percent signs are variable delimiters in Windows batch scripts.
+        def batch_quote(value):
+            return '"' + str(value).replace("%", "%%").replace('"', '""') + '"'
+
+        content = (
+            "@echo off\n"
+            f"cd /d {batch_quote(app_file.parent)} || exit /b 1\n"
+            f"{batch_quote(sys.executable)} -m streamlit run {batch_quote(app_file)} "
+            "--server.headless false\n"
+            "pause\n"
+        )
+    else:
+        launcher = desktop / "ACGME Case Log Helper.command"
+        content = (
+            "#!/bin/bash\n"
+            f"cd {shlex.quote(str(app_file.parent))} || exit 1\n"
+            f"{shlex.quote(sys.executable)} -m streamlit run {shlex.quote(str(app_file))} "
+            "--server.headless false\n"
+        )
     launcher.write_text(content, encoding="utf-8")
-    launcher.chmod(0o755)
+    if system == "Darwin":
+        launcher.chmod(0o755)
     return launcher
 
 
 with st.sidebar:
-    if st.button("Create Desktop Shortcut", help="Mac: add a double-clickable launcher to your Desktop"):
+    if st.button("Create Desktop Shortcut", help="Mac or Windows: add a double-clickable launcher to your Desktop"):
         try:
             shortcut_path = create_desktop_shortcut()
             st.success(f"Shortcut created: {shortcut_path.name}")
